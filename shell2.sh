@@ -1,166 +1,118 @@
-#!/usr/bin/env bash
-# Script which generates documentation from the docs folder into html.
-#set -x
-init_vars () {
-    BD_TOOLS="$PWD/tools/build-docs"
-    PATCH_FILE="$BD_TOOLS/markdown-to-ascii.patch"
-    REPO_FOLDER="$BD_TOOLS/org-asciidoc/"
-    MD_REPO_FOLDER="$BD_TOOLS/markdown-to-asciidoc"
-    DOCS_FOLDER="$PWD/docs"
-    MD_CMD="$MD_REPO_FOLDER/build/scripts/markdown_to_asciidoc"
-    DELETE_ADOC_AFTER=1
-    REPO_BASE="$PWD"
-}
-init_vars
-notef () {
-    printf "$@" 1>&2
-}
-die () {
-    notef "$@"
-    exit 1
+#! /bin/sh
+###########################################################################
+##                                                                       ##
+## Copyright (c) 2015, Red Hat Inc.                                      ##
+##                                                                       ##
+## This program is free software: you can redistribute it and/or modify  ##
+## it under the terms of the GNU General Public License as published by  ##
+## the Free Software Foundation, either version 3 of the License, or     ##
+## (at your option) any later version.                                   ##
+##                                                                       ##
+## This program is distributed in the hope that it will be useful,       ##
+## but WITHOUT ANY WARRANTY; without even the implied warranty of        ##
+## MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the          ##
+## GNU General Public License for more details.                          ##
+##                                                                       ##
+## You should have received a copy of the GNU General Public License     ##
+## along with this program. If not, see <http://www.gnu.org/licenses/>.  ##
+##                                                                       ##
+## Author: Chunyu Hu <chuhu@redhat.com>                                  ##
+##                                                                       ##
+###########################################################################
+
+. test.sh
+
+triggers="traceon traceoff enable_event disable_event snapshot \
+	 dump cpudump stacktrace module function"
+nr_triggers=$(echo ${triggers} | wc -w)
+
+module_pick()
+{
+	nr_module=$(lsmod | wc -l)
+	pick_one=$(tst_random 1 $nr_module)
+	picked_module=$(lsmod | awk "{if (NR == $pick_one) {print \$1}}")
 }
 
-check_for_cmd () {
-    if which "$1" > /dev/null 2>&1; then
-        return 0
-    else
-        return 1
-    fi
-}
-find_gradle () {
-    if check_for_cmd gradle; then
-        printf "gradle"
-    else
-        IFS_SAVE="$IFS"
-        IFS=":"
-        THING=""
-        for i in $PATH; do
-            if [ -z "$THING" ] && [ -d "$i" ]; then
-                THING=$(find "$i" -name 'gradle-*' | sort | head -n 1)
-            fi
-        done
-        IFS="$IFS_SAVE"
-        printf "%s" "$THING"
-    fi
-}
-prepare_org_repo () {
-    if ! check_for_cmd emacs; then
-        die "Can't find emacs"
-    fi
-    if [ ! -d "$REPO_FOLDER" ]; then
-        git clone https://github.com/yashi/org-asciidoc "$REPO_FOLDER" || exit "$?"
-    fi
-}
-prepare_md_repo () {
-    if [ ! -d "$MD_REPO_FOLDER" ]; then
-        git clone https://github.com/bodiam/markdown-to-asciidoc "$MD_REPO_FOLDER" || exit "$?"
-        cd -- "$MD_REPO_FOLDER"
-        patch -p1 < "$PATCH_FILE"
-    fi
-    if [ ! -f "$MD_CMD" ]; then
-        cd -- "$MD_REPO_FOLDER" || exit "$?"
-        GRADLE=$(find_gradle)
-        if [ "$GRADLE" ]; then
-            notef "have gradle $GRADLE\n"
-        else
-            die "no have gradle\n"
-        fi
-        TERM=xterm "$GRADLE" build 1>&2 || exit "$?"
-        mv build/libs build/lib || exit "$?"
-    fi
+filter_file=$TRACING_PATH/available_filter_functions
+nr_functions=$(awk 'END{print NR}' $filter_file)
+
+function_pick()
+{
+	if [ -f $filter_file ]; then
+		local pick_one=$(tst_random 1 $nr_functions)
+		picked_function=$(awk "{if (NR == $pick_one) {print \$1}}" $filter_file)
+		echo $picked_function
+	else
+		echo "\*sched\*"
+	fi
 }
 
-get_highlight_option () {
-    HIGHLIGHT_OPTION=source-highlighter=pygments
-    if check_for_cmd gem; then
-        if gem list | grep -F pygments.rb >/dev/null ; then
-            notef "Have pygments.rb, continuing with highlighting\n"
-        else
-            notef "Don't have pygments.rb, trying to install\n"
-            gem install pygments.rb
-            if [ "$?" != 0 ]; then
-                HIGHLIGHT_OPTION=source-highlighter!
-                notef "Failed installing pygments.rb, disabling highlighting\n"
-            fi
-        fi
-    else
-        notef "Don't have command gem. Disabling highlighting\n"
-    fi
-    printf "%s" "$HIGHLIGHT_OPTION"
+event_pick()
+{
+	local events_file=$TRACING_PATH/available_events
+	if [ -f $events_file ]; then
+		nr_events=$(awk 'END{print NR}' $events_file)
+		local pick_one=$(tst_random 1 $nr_events)
+		picked_event=$(awk "{if (NR == $pick_one) {print \$0}}" $events_file)
+		echo "$picked_event"
+	else
+		echo "sched:sched_switch"
+	fi
 }
-convert_org_to_asciidoc () {
-    SOURCE_FILE="$1"
-    OUTPUT_FILE="$2"
-    LOAD_LIB_CMD="(add-to-list 'load-path \"$REPO_FOLDER\")
-                  (require 'ox-asciidoc)"
-    WRITE_CMD="(write-file \"$OUTPUT_FILE\")"
-    TEMPFILE=$(tempfile)
-    printf "%s" "$LOAD_LIB_CMD" > "$TEMPFILE"
-    emacs -batch "$SOURCE_FILE" --load "$TEMPFILE" -f org-asciidoc-export-as-asciidoc --eval "$WRITE_CMD"
-    #emacs -batch "$SOURCE_FILE" --eval "$LOAD_LIB_CMD (org-asciidoc-export-as-asciidoc) $WRITE_CMD" 1>&2 || exit "$?"
+
+filter_formatter()
+{
+	function_str=$(function_pick)
+	count=$(tst_random 0 2)
+
+	case $1 in
+	traceon|traceoff|snapshot|dump|cpudump|stacktrace)
+		trigger=$1
+		;;
+	enable_event|disable_event)
+		event_sys_name=$(event_pick)
+		trigger=$1:$event_sys_name
+		;;
+	module)
+		module_pick
+		echo ":mod:$picked_module"
+		return
+		;;
+	function)
+		echo "$function_str"
+		return
+		;;
+	*)
+		trigger=$1
+		;;
+	esac
+
+	if [ $count -gt 0 ]; then
+		trigger=$trigger:$count
+	fi
+	echo $function_str:$trigger
 }
-convert_md_to_asciidoc () {
-    SOURCE_FILE="$1"
-    OUTPUT_FILE="$2"
-    #echo "$SOURCE_FILE"
-    $MD_CMD "$SOURCE_FILE" > "$OUTPUT_FILE" || exit "$?"
+
+signal_handler()
+{
+	tst_exit
 }
-if [ ! -d "$BD_TOOLS" ]; then
-    cd ..
-    init_vars
-    if [ ! -d "$BD_TOOLS" ]; then
-        cd ..
-        init_vars
-        if [ ! -d "$BD_TOOLS" ]; then
-            die "You are in the wrong folder\n"
-        fi
-    fi
-fi
-prepare_md_repo
-prepare_org_repo
-if [ "$1" == org2adoc ]; then
-    #shift
-    set -x
-    convert_org_to_asciidoc "$(readlink -f "$2")" "$(readlink -f "$3")"
-    exit "$?"
-fi
-declare -a added_files
-for i in $(find "$DOCS_FOLDER" -name '*.org'); do
-    SOURCE_FILE="$i"
-    OUTPUT_FILE="${SOURCE_FILE/.*/}.asciidoc"
-    convert_org_to_asciidoc "$SOURCE_FILE" "$OUTPUT_FILE"
-    added_files+=("$OUTPUT_FILE")
+
+trap signal_handler SIGTERM
+
+while true; do
+	# Here try to check if a race caused issue can be hit.
+	cat $TRACING_PATH/set_ftrace_filter > /dev/null
+
+	trigger_index=$(tst_random 1 $nr_triggers)
+	trigger_name=$(echo $triggers | awk "{print \$$trigger_index}")
+	filter_format=$(filter_formatter $trigger_name)
+
+	echo "$filter_format" > $TRACING_PATH/set_ftrace_filter
+	[ $? -ne 0 ] && tst_resm TFAIL "$0: setup filter <$filter_format> failed"
+
+	sleep 2
+
+	echo "!$filter_format" > $TRACING_PATH/set_ftrace_filter
+	[ $? -ne 0 ] && tst_resm TFAIL "$0: remove filter <$filter_format> failed"
 done
-for i in $(find "$DOCS_FOLDER" -regex '.*\.md\|.*\.markdown'); do
-    SOURCE_FILE="$i"
-    OUTPUT_FILE="${SOURCE_FILE/.*/}.asciidoc"
-    convert_md_to_asciidoc "$SOURCE_FILE" "$OUTPUT_FILE"
-    added_files+=("$OUTPUT_FILE")
-done
-if [ ! -f "$DOCS_FOLDER/README.asciidoc" ]; then
-    die "no file"
-fi
-fix_readme_links () {
-    NODOT="[^[]"
-    NO="[^[]"
-    sed -Ei "s/link:($NO+)\.(asciidoc|adoc|md|markdown|org)\[($NO+)\]/<<\1.asciidoc#,\3>>/g" "$DOCS_FOLDER/README.asciidoc" || exit "$?"
-    # Maybe uncomment later if we get the ChangeLog converting to asciidoc
-    #sed -Ei "s/link:(ChangeLog)\[($NO+)\]/<<\1.asciidoc#,\2>>/g" "$DOCS_FOLDER/README.asciidoc" || exit "$?"
-}
-fix_readme_links
-asciidoctor \
-    -a relative-ext=.html \
-    -a "$(get_highlight_option)" \
-    -a tip-caption=💡 \
-    -a note-caption=🛈 \
-    -a important-caption=❗ \
-    -a caution-caption=🔥 \
-    -a warning-caption=⚠️ \
-    -a author! \
-    "$DOCS_FOLDER"/*.asciidoc "$DOCS_FOLDER/jit"/*.asciidoc || die "$?"
-mv -- "$DOCS_FOLDER/README.html" "$DOCS_FOLDER/index.html"
-if [ "$DELETE_ADOC_AFTER" == 1 ]; then
-    for i in ${added_files[@]}; do
-        rm -- "$i"
-    done
-fi
